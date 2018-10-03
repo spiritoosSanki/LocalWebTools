@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<meta charset="utf-8" />
+		<title>GPS debug</title>
+		
+		<style>
+			  #map {
+				width: 800px;
+				height: 400px;
+			  }
+		</style>
+	</head>
+	<body>
+		<h1>GPS debug</h1>
+
+		<p>There are 3 uses for this tool: </p>
+		<ul>
+			<li>Draw a perimeter from gps coordinate</li>
+			<li>Draw a margin around this perimeter</li>
+			<li>Check if a set of gps coordinates are inside the perimeter and the marge.</li>
+		</ul>
+		<p>
+			Note: you must add your google maps API key in the javascript link (find and replace YOUR_API_KEY with your own key). 
+			Then you must host this file on a webserver.
+		</p>
+		
+		<div id="info"></div>
+		<div id="map"></div>
+		<input id="refresh" type="button" value="refresh"/>
+		<br /><br />
+	
+		<label for="perimeter">Perimeter</label><br />
+		<textarea id="perimeter"></textarea><br />
+		<label for="marge">Marge (in meter)</label><br />
+		<input type="text" id="marge" /><br />
+		<label for="points">Points</label><br />
+		<textarea id="points"></textarea><br />
+		
+		<br /><br />
+		<input id="run" type="button" value="run algo"/>
+		<div id="result"></div>
+		
+		<script type="text/javascript" src="../jquery-3.2.1.js"></script>
+		
+		<script type="text/javascript">
+			
+			map = null;
+			
+			function initMap() {
+				// Create a map object and specify the DOM element for display.
+				map = new google.maps.Map(document.getElementById('map'), {
+				  center: {lat: -20.285114, lng: 57.578876},
+				  zoom: 9
+				});
+				
+				google.maps.event.addListener(map, 'click', function(event) {
+					info.html(event.latLng.lat() + ":" + event.latLng.lng());
+				});
+			}
+
+			var perimeterInput = $("#perimeter");
+			var run = $("#run");
+			var result = $("#result");
+			var pointsInput = $("#points");
+			var margeInput = $("#marge");
+			var refresh = $("#refresh");
+			var info = $("#info");
+			
+			
+			var perimeterPolygon = null;
+			var markers = [];
+			var circles = [];
+			var polylines = [];
+			
+
+			
+			$(function() {
+				perimeterInput.val("+47.89572:+11.60156	+47.18374:+3.86719	+50.98057:+5.80078");
+				
+				margeInput.val(163000);
+				
+				
+				refresh.click(function() {
+					var perimeter = drawPerimeterAndMarge();
+					var bound = getPolygonBounds(perimeterPolygon);
+					map.fitBounds(bound);
+				});
+				
+				run.click(function() {
+					var perimeter = drawPerimeterAndMarge();
+					
+					var pointsArray = xlsCoordinates2Array(pointsInput.val());
+					var points = arrayCoordinatesToLatLng(pointsArray);
+					drawMarkers(points);
+					
+					var bound = getPolygonBounds(perimeterPolygon);
+					$.each(points, function() {
+						bound.extend(this);
+					});
+					map.fitBounds(bound);
+					
+					var resTab = $("<table></table>");
+					
+					areInPerimeter(perimeter, points, margeInput.val(), resTab);
+					
+					result.empty().append(resTab);
+				});
+			});
+			
+			var drawPerimeterAndMarge = function() {
+				var perimeterArray = xlsCoordinates2Array(perimeterInput.val());
+				var perimeter = arrayCoordinatesToLatLng(perimeterArray);
+				
+				var marge = margeInput.val() * 1;
+				
+				drawPerimeter(perimeter);
+				drawMargeCircle(perimeter, marge);
+				drawMargeLines(perimeter, marge);
+				
+				return perimeter;
+			};
+			
+			var clearCircles = function() {
+				$.each(circles, function(i, circle) {
+					circle.setMap(null);
+				});
+				circles = [];
+			};
+			
+			var drawMargeLines = function(perimeter, marge) {
+				
+				clearPolylines();
+				
+				var sides = perimeter.length;
+				var j = sides-1;
+				
+				for(var i=0; i<sides; i++) {
+					var aLong = perimeter[i].lng;
+					var aLat = perimeter[i].lat;
+					var bLong = perimeter[j].lng;
+					var bLat = perimeter[j].lat;
+					
+					var bearingA = bearing(aLong, aLat, bLong, bLat);
+					var bearingA1 = (bearingA + 90) % 360;
+					var bearingA2 = (bearingA + 270) % 360;
+					
+					var a1 = project(aLat, aLong, bearingA1, marge);
+					var a2 = project(aLat, aLong, bearingA2, marge);
+					
+					var bearingB = bearing(bLong, bLat, aLong, aLat);
+					var bearingB1 = (bearingB + 90) % 360;
+					var bearingB2 = (bearingB + 270) % 360;
+					
+					var b1 = project(bLat, bLong, bearingB1, marge);
+					var b2 = project(bLat, bLong, bearingB2, marge);
+					
+					drawMargePolyline([a1, b2]);
+					drawMargePolyline([a2, b1]);
+					
+					j = i;
+				}
+			};
+			
+			var clearPolylines = function() {
+				$.each(polylines, function(i, polyline) {
+					polyline.setMap(null);
+				});
+				polylines = [];
+			};
+			
+			var drawMargePolyline = function(path) {
+				polylines.push(
+					new google.maps.Polyline({
+					  path: path,
+					  geodesic: true,
+					  strokeColor: '#0000FF',
+					  strokeOpacity: 1.0,
+					  strokeWeight: 2,
+					  map: map
+					})
+				);
+			};
+			
+			var project = function(aLat, aLong, brng, d) {
+				var R = _eQuatorialEarthRadius * 1000;
+				var brngR = toRadians(brng);
+				var lat1 = toRadians(aLat);
+				var lng1 = toRadians(aLong);
+				
+				var lat2 = Math.asin( Math.sin(lat1)*Math.cos(d/R) + Math.cos(lat1)*Math.sin(d/R)*Math.cos(brngR) );
+				var lng2 = lng1 + Math.atan2(Math.sin(brngR)*Math.sin(d/R)*Math.cos(lat1), Math.cos(d/R)-Math.sin(lat1)*Math.sin(lat2));
+				return {lat: toDegrees(lat2), lng: toDegrees(lng2)};
+			};
+			
+			var toRadians = function(n) {
+				return n * Math.PI / 180;
+			};
+			
+			var toDegrees = function(n) {
+				return n * 180 / Math.PI;
+			};
+			
+			var bearing = function(aLong, aLat, bLong, bLat) {
+				
+				var φ1 = toRadians(aLat), φ2 = toRadians(bLat);
+				var Δλ = toRadians(bLong-aLong);
+				var y = Math.sin(Δλ) * Math.cos(φ2);
+				var x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2) * Math.cos(Δλ);
+				var θ = Math.atan2(y, x);
+
+				return (toDegrees(θ) + 360) % 360;
+				
+				/*var y = Math.sin(bLong-aLong) * Math.cos(bLat);
+				var x = Math.cos(aLat)*Math.sin(bLat) - Math.sin(aLat)*Math.cos(bLat)*Math.cos(bLong-aLong);
+				
+				var atan2 = (Math.atan2(y, x));
+				var deg = atan2 * (180/Math.PI);
+				
+				if(deg < 0.0) {
+					deg += 360;
+				}
+				
+				return deg;*/
+			};
+			
+			var drawMargeCircle = function(perimeter, marge) {
+				
+				$.each(perimeter, function() {
+					circles.push(
+						new google.maps.Circle({
+							strokeColor: '#00FF00',
+							strokeOpacity: 0.7,
+							strokeWeight: 2,
+							fillColor: '#00FF00',
+							fillOpacity: 0.0,
+							map: map,
+							center: this,
+							radius: marge
+					}));
+				});
+			};
+			
+			var areInPerimeter= function(perimeter, points, marge, resTab) {
+				var header = $("<tr><td>Coordinate</td><td>In perimeter</td></tr>");
+				resTab.append(header);
+				
+				$.each(points, function(i, point) {
+					var inPerimeter = isInPerimeter(perimeter, point, marge);
+					var line = $("<tr><td>" + point.lat + " / " + point.lng + "</td><td>" + inPerimeter + "</td></tr>");
+					resTab.append(line);
+				});
+				
+			};
+			
+			var isInPerimeter = function(perimeter, point, marge) {
+				var sides = perimeter.length;
+				var j = sides-1;
+				var inPerimeter = false;
+				
+				for(var i=0; i<sides; i++) {
+					if(perimeter[i].lat <= perimeter[j].lat) {
+						var aLong = perimeter[i].lng;
+						var aLat = perimeter[i].lat;
+						var bLong = perimeter[j].lng;
+						var bLat = perimeter[j].lat;
+					} else {
+						var aLong = perimeter[j].lng;
+						var aLat = perimeter[j].lat;
+						var bLong = perimeter[i].lng;
+						var bLat = perimeter[i].lat;
+					}
+					
+					if(aLat < point.lat && point.lat <= bLat) {
+						var lngIntersectionWithSide = aLong + (((point.lat - aLat) / (bLat - aLat)) * (bLong - aLong));
+						if(lngIntersectionWithSide < point.lng) {
+							inPerimeter = !inPerimeter;
+						}
+					}
+					j=i;
+				}
+				
+				if(inPerimeter) {
+					return true;
+				} else {
+					j = sides-1;
+					for(var i=0; i<sides; i++) {
+						if(perimeter[i].lat <= perimeter[j].lat) {
+							var aLong = perimeter[i].lng;
+							var aLat = perimeter[i].lat;
+							var bLong = perimeter[j].lng;
+							var bLat = perimeter[j].lat;
+						} else {
+							var aLong = perimeter[j].lng;
+							var aLat = perimeter[j].lat;
+							var bLong = perimeter[i].lng;
+							var bLat = perimeter[i].lat;
+						}
+						
+						var t = (((point.lng - aLong) * (bLong - aLong)) + ((point.lat - aLat) * (bLat - aLat))) / (((bLong - aLong) * (bLong - aLong)) + ((bLat - aLat) * (bLat - aLat)));
+						var tmpLong = aLong + (t * (bLong - aLong));
+						var tmpLat = aLat + (t * (bLat - aLat));
+						
+						if(tmpLong < aLong && tmpLong < bLong) {
+							if(aLong < bLong) {
+								tmpLong = aLong;
+								tmpLat = aLat;
+							} else {
+								tmpLong = bLong;
+								tmpLat = bLat;
+							}
+						} else if(tmpLong > aLong && tmpLong > bLong) {
+							if(aLong > bLong) {
+								tmpLong = aLong;
+								tmpLat = aLat;
+							} else {
+								tmpLong = bLong;
+								tmpLat = bLat;
+							}
+						}
+						
+						/*new google.maps.Polyline({
+						  path: [
+							{lat: point.lat, lng: point.lng}, 
+							{lat: tmpLat, lng: tmpLong}],
+						  geodesic: true,
+						  strokeColor: '#0000FF',
+						  strokeOpacity: 1.0,
+						  strokeWeight: 2,
+						  map: map
+						});*/
+						/*circles.push(
+							new google.maps.Circle({
+								strokeColor: '#00FF00',
+								strokeOpacity: 0.7,
+								strokeWeight: 2,
+								fillColor: '#00FF00',
+								fillOpacity: 0.0,
+								map: map,
+								center: {lat: tmpLat, lng: tmpLong},
+								radius: marge * 1
+						}));*/
+						
+						var distance = haversineInKm(point.lat, point.lng, tmpLat, tmpLong) * 1000;
+						if(distance <= marge) {
+							return true;
+						}
+						j=i;
+					}
+					return false;
+				}
+				
+				return inPerimeter;
+			};
+			
+			var _eQuatorialEarthRadius = 6378.1370;
+			var _d2r = (Math.PI / 180);
+
+			var haversineInKm = function(lat1, long1, lat2, long2) {
+				var dlong = (long2 - long1) * _d2r;
+				var dlat = (lat2 - lat1) * _d2r;
+				var a = Math.pow(Math.sin(dlat / 2), 2) + Math.cos(lat1 * _d2r) * Math.cos(lat2 * _d2r) * Math.pow(Math.sin(dlong / 2), 2);
+				var c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+				var d = _eQuatorialEarthRadius * c;
+
+				return d;
+			};
+			
+			var arrayCoordinatesToLatLng = function(arrayCoordinates) {
+				return $.map(arrayCoordinates, function(point) {
+					return {lat: point[0], lng: point[1]};
+				});
+			};
+			
+			var xlsCoordinates2Array = function(xlsCoordinates) {
+				var result = [];
+				var separatePoints = xlsCoordinates.split("\t");
+				$.each(separatePoints, function(i, val) {
+					var split = val.split(":");
+					var lat = parseFloat(split[0]);
+					var lon = parseFloat(split[1]);
+					result.push([lat, lon]);
+				});
+				return result;
+			};
+			
+			var drawPerimeter = function(perimeterCoordinates) {
+				if(perimeterPolygon) {
+					perimeterPolygon.setMap(null);
+				}
+				
+				perimeterPolygon = new google.maps.Polygon({
+					paths: perimeterCoordinates,
+					strokeColor: '#FF0000',
+					strokeOpacity: 0.8,
+					strokeWeight: 2,
+					fillColor: '#FF0000',
+					fillOpacity: 0.35
+				});
+				perimeterPolygon.setMap(map);
+				
+				return perimeterPolygon;
+			};
+			
+			var getPolygonBounds = function(polygon) {
+				var paths = polygon.getPaths();
+				var bounds = new google.maps.LatLngBounds();
+				paths.forEach(function(path) {
+					var ar = path.getArray();
+					for(var i = 0, l = ar.length;i < l; i++) {
+						bounds.extend(ar[i]);
+					}
+				});
+				return bounds;
+			};
+			
+			var clearMarkers = function() {
+				$.each(markers, function(i, marker) {
+					marker.setMap(null);
+				});
+				markers = [];
+			};
+			
+			var drawMarkers = function(points) {
+				
+				clearMarkers();
+				
+				$.each(points, function(i, point) {
+					var marker = new google.maps.Marker({
+						position: point,
+						map: map,
+						title: 'Test!'
+					});
+					markers.push(marker);
+				});
+
+			};
+			
+		</script>
+		<script src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY&callback=initMap" async defer></script>
+
+		
+	</body>
+</html>

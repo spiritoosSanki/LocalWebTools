@@ -1,0 +1,6 @@
+You can use the lightweight http server : 
+https://www.npmjs.com/package/http-server
+
+Start server like this:
+http-server "Path\To\Your\Root\Web\Folder"
+
